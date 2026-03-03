@@ -2,6 +2,8 @@
 
 Pure Rust inference engine for OpenAI's Whisper Tiny. No Python, no CUDA, no external dependencies. Single executable + binary weights = portable speech-to-text on any machine.
 
+Downlod 🤗: https://huggingface.co/qoranet/QORA-STT
+
 Based on **openai/whisper-tiny** (MIT License).
 
 ## Quick Start
