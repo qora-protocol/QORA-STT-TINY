@@ -112,6 +112,18 @@ model/
 - **KV caching**: Cross-attention K/V computed once, reused every decoder step
 - **Self-attention cache**: Grows incrementally, no recomputation
 
+### AVX-512 SIMD Acceleration
+
+On CPUs with AVX-512 support (Intel 11th gen+, AMD Zen 4+), QORA-STT automatically uses hand-written AVX-512 SIMD kernels:
+
+| Kernel | Technique | Speedup |
+|--------|-----------|---------|
+| **F32 GEMV** | `fmadd_ps` FMA with 16 f32 values per cycle | ~2x |
+| **F32 GEMV+bias** | Fused multiply-add with bias addition | ~2x |
+| **F32 GEMM row** | Vectorized single-row accumulation | ~2x |
+
+Detection is automatic at runtime — falls back to scalar code on non-AVX-512 CPUs with zero overhead.
+
 ## Converting from Safetensors
 
 If you have the original `openai/whisper-tiny` safetensors:
