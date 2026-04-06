@@ -4,7 +4,27 @@
 //! Output: encoder hidden states [1500, 384]
 
 use rayon::prelude::*;
+use std::sync::atomic::{AtomicU8, Ordering};
 use crate::weights::{EncoderWeights, EncoderLayerWeights};
+
+/// Cached AVX-512 detection: 0 = unchecked, 1 = no, 2 = yes.
+static AVX512_DETECTED: AtomicU8 = AtomicU8::new(0);
+
+#[inline]
+fn use_avx512() -> bool {
+    match AVX512_DETECTED.load(Ordering::Relaxed) {
+        2 => true,
+        1 => false,
+        _ => {
+            let has = crate::simd::has_avx512();
+            AVX512_DETECTED.store(if has { 2 } else { 1 }, Ordering::Relaxed);
+            if has {
+                eprintln!("[SIMD] AVX-512F detected — using accelerated kernels");
+            }
+            has
+        }
+    }
+}
 
 /// Run the full encoder forward pass.
 /// mel: [n_mels, n_frames] = [80, 3000] in channel-first format.
@@ -234,6 +254,7 @@ fn ffn_forward(
 /// W is stored row-major as [k, n] (pre-transposed from [n, k]).
 /// Parallelized over rows with cache-friendly i-p-j loop order.
 pub fn gemm_bias(a: &[f32], m: usize, k: usize, w: &[f32], n: usize, bias: &[f32]) -> Vec<f32> {
+    let avx512 = use_avx512();
     let mut out = vec![0.0f32; m * n];
 
     // Parallelize over rows
@@ -241,8 +262,15 @@ pub fn gemm_bias(a: &[f32], m: usize, k: usize, w: &[f32], n: usize, bias: &[f32
         // Initialize with bias
         row.copy_from_slice(&bias[..n]);
 
-        // i-p-j order: iterate over k-dim first, then broadcast into output row
         let a_row = &a[i * k..(i + 1) * k];
+
+        #[cfg(target_arch = "x86_64")]
+        if avx512 {
+            unsafe { crate::simd::gemm_row_avx512(row, a_row, w, k, n) };
+            return;
+        }
+
+        // Scalar fallback: i-p-j order
         for p in 0..k {
             let a_val = a_row[p];
             let w_row = &w[p * n..(p + 1) * n];
@@ -257,10 +285,19 @@ pub fn gemm_bias(a: &[f32], m: usize, k: usize, w: &[f32], n: usize, bias: &[f32
 
 /// GEMM without bias: A[m, k] @ W[k, n] → out[m, n].
 pub fn gemm_nobias(a: &[f32], m: usize, k: usize, w: &[f32], n: usize) -> Vec<f32> {
+    let avx512 = use_avx512();
     let mut out = vec![0.0f32; m * n];
 
     out.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
         let a_row = &a[i * k..(i + 1) * k];
+
+        #[cfg(target_arch = "x86_64")]
+        if avx512 {
+            unsafe { crate::simd::gemm_row_avx512(row, a_row, w, k, n) };
+            return;
+        }
+
+        // Scalar fallback
         for p in 0..k {
             let a_val = a_row[p];
             let w_row = &w[p * n..(p + 1) * n];
@@ -275,6 +312,11 @@ pub fn gemm_nobias(a: &[f32], m: usize, k: usize, w: &[f32], n: usize) -> Vec<f3
 
 /// GEMV without bias: x[k] @ W[k, n] → out[n].
 pub fn gemv_nobias(x: &[f32], w: &[f32], k: usize, n: usize) -> Vec<f32> {
+    #[cfg(target_arch = "x86_64")]
+    if use_avx512() {
+        return unsafe { crate::simd::gemv_f32_avx512(x, w, k, n) };
+    }
+
     let mut out = vec![0.0f32; n];
     for p in 0..k {
         let x_val = x[p];
@@ -288,6 +330,11 @@ pub fn gemv_nobias(x: &[f32], w: &[f32], k: usize, n: usize) -> Vec<f32> {
 
 /// GEMV with bias: x[k] @ W[k, n] + bias[n] → out[n].
 pub fn gemv_bias(x: &[f32], w: &[f32], k: usize, n: usize, bias: &[f32]) -> Vec<f32> {
+    #[cfg(target_arch = "x86_64")]
+    if use_avx512() {
+        return unsafe { crate::simd::gemv_f32_avx512_bias(x, w, k, n, bias) };
+    }
+
     let mut out = bias.to_vec();
     for p in 0..k {
         let x_val = x[p];

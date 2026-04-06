@@ -8,3 +8,4 @@ pub mod decoder;
 pub mod inference;
 pub mod tokenizer;
 pub mod save;
+pub mod simd;
